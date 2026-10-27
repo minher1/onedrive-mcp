@@ -18,8 +18,10 @@ For binary Office files (`.docx`, `.xlsx`, `.pptx`), `onedrive_read` returns the
 
 ## Prerequisites
 
-- **Node.js 18+**
-- OneDrive for Business synced to your local machine (default path: `C:\Users\<you>\OneDrive - IBM`)
+- **Node.js 18+** — download at [nodejs.org](https://nodejs.org) if not installed (`node --version` to check)
+- OneDrive for Business synced to your local machine
+  - IBM employees: typically `C:\Users\<you>\OneDrive - IBM`
+  - Check by opening File Explorer — look for a folder named **OneDrive - IBM** under your user folder
 
 ---
 
@@ -27,36 +29,47 @@ For binary Office files (`.docx`, `.xlsx`, `.pptx`), `onedrive_read` returns the
 
 ### 1. Clone and install
 
+Open PowerShell and run:
+
 ```powershell
+cd "C:\Users\<you>\Documents"
 git clone https://github.com/minher1/onedrive-mcp.git
 cd onedrive-mcp
 npm install
 npm run build
 ```
 
+> Replace `<you>` with your Windows username. The repo can live anywhere — just note the full path for the next step.
+
 ### 2. Register in Bob
 
-Add this to `C:\Users\<you>\.bob\settings\mcp.json` under `mcpServers`:
+Open `C:\Users\<you>\.bob\settings\mcp.json` in any text editor and add the `onedrive` entry inside the existing `mcpServers` block:
 
 ```json
-"onedrive": {
-  "command": "node",
-  "args": ["C:\\path\\to\\onedrive-mcp\\build\\index.js"]
+{
+  "mcpServers": {
+    "onedrive": {
+      "command": "node",
+      "args": ["C:\\Users\\<you>\\Documents\\onedrive-mcp\\build\\index.js"]
+    }
+  }
 }
 ```
 
-Bob hot-reloads on save. Check the MCP panel — you should see **onedrive** connected with 3 tools.
+> If you already have other servers in `mcp.json`, just add the `"onedrive": { ... }` block alongside them — don't replace the whole file.
+
+Save the file. Bob hot-reloads on save — check the MCP panel and you should see **onedrive** with a green dot and 3 tools.
 
 ### 3. (Optional) Override the OneDrive root path
 
-If your OneDrive syncs to a different folder, set the `ONEDRIVE_ROOT` environment variable:
+The server defaults to `C:\Users\<you>\OneDrive - IBM`. If your OneDrive syncs to a different folder, add an `env` block:
 
 ```json
 "onedrive": {
   "command": "node",
-  "args": ["C:\\path\\to\\onedrive-mcp\\build\\index.js"],
+  "args": ["C:\\Users\\<you>\\Documents\\onedrive-mcp\\build\\index.js"],
   "env": {
-    "ONEDRIVE_ROOT": "C:\\Users\\you\\OneDrive - IBM"
+    "ONEDRIVE_ROOT": "C:\\Users\\<you>\\OneDrive - IBM"
   }
 }
 ```
