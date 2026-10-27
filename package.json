@@ -1,0 +1,23 @@
+{
+  "name": "onedrive-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for reading OneDrive files into Bob",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": { "onedrive-mcp": "./build/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "files": ["build"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@azure/msal-node": "^2.0.0",
+    "node-fetch": "^3.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
