@@ -19,29 +19,30 @@ For binary Office files (`.docx`, `.xlsx`, `.pptx`), `onedrive_read` returns the
 ## Prerequisites
 
 - **Node.js 18+** — download at [nodejs.org](https://nodejs.org) if not installed (`node --version` to check)
-- OneDrive for Business synced to your local machine
-  - IBM employees: typically `C:\Users\<you>\OneDrive - IBM`
-  - Check by opening File Explorer — look for a folder named **OneDrive - IBM** under your user folder
+- OneDrive for Business synced to your local machine via the **OneDrive app**
+  - **Windows:** typically `C:\Users\<you>\OneDrive - IBM`
+  - **Mac:** typically `/Users/<you>/OneDrive - IBM`
+  - To confirm: open Finder (Mac) or File Explorer (Windows) and look for a folder named **OneDrive - IBM**
 
 ---
 
 ## Quick Start
 
-### 1. Clone and install
+### Windows
+
+#### 1. Clone and install
 
 Open PowerShell and run:
 
 ```powershell
-cd "C:\Users\<you>\Documents"
-git clone https://github.com/minher1/onedrive-mcp.git
+cd "$HOME\Documents"
+git clone https://github.ibm.com/marbrouet/onedrive-mcp.git
 cd onedrive-mcp
 npm install
 npm run build
 ```
 
-> Replace `<you>` with your Windows username. The repo can live anywhere — just note the full path for the next step.
-
-### 2. Register in Bob
+#### 2. Register in Bob
 
 Open `C:\Users\<you>\.bob\settings\mcp.json` in any text editor and add the `onedrive` entry inside the existing `mcpServers` block:
 
@@ -60,16 +61,70 @@ Open `C:\Users\<you>\.bob\settings\mcp.json` in any text editor and add the `one
 
 Save the file. Bob hot-reloads on save — check the MCP panel and you should see **onedrive** with a green dot and 3 tools.
 
-### 3. (Optional) Override the OneDrive root path
+---
 
-The server defaults to `C:\Users\<you>\OneDrive - IBM`. If your OneDrive syncs to a different folder, add an `env` block:
+### Mac
 
+#### 1. Clone and install
+
+Open Terminal and run:
+
+```bash
+cd ~/Documents
+git clone https://github.ibm.com/marbrouet/onedrive-mcp.git
+cd onedrive-mcp
+npm install
+npm run build
+```
+
+#### 2. Register in Bob
+
+Open `~/.bob/settings/mcp.json` in any text editor (e.g. `open -e ~/.bob/settings/mcp.json`) and add the `onedrive` entry inside the existing `mcpServers` block:
+
+```json
+{
+  "mcpServers": {
+    "onedrive": {
+      "command": "node",
+      "args": ["/Users/<you>/Documents/onedrive-mcp/build/index.js"]
+    }
+  }
+}
+```
+
+> Replace `<you>` with your Mac username (`whoami` in Terminal to check).
+> If you already have other servers in `mcp.json`, just add the `"onedrive": { ... }` block alongside them — don't replace the whole file.
+
+Save the file. Bob hot-reloads on save — check the MCP panel and you should see **onedrive** with a green dot and 3 tools.
+
+---
+
+### Overriding the OneDrive root path (both platforms)
+
+The server auto-detects your platform and defaults to:
+- **Windows:** `C:\Users\<you>\OneDrive - IBM`
+- **Mac:** `/Users/<you>/OneDrive - IBM`
+
+If your OneDrive syncs to a different folder, add an `env` block:
+
+**Windows:**
 ```json
 "onedrive": {
   "command": "node",
   "args": ["C:\\Users\\<you>\\Documents\\onedrive-mcp\\build\\index.js"],
   "env": {
     "ONEDRIVE_ROOT": "C:\\Users\\<you>\\OneDrive - IBM"
+  }
+}
+```
+
+**Mac:**
+```json
+"onedrive": {
+  "command": "node",
+  "args": ["/Users/<you>/Documents/onedrive-mcp/build/index.js"],
+  "env": {
+    "ONEDRIVE_ROOT": "/Users/<you>/OneDrive - IBM"
   }
 }
 ```

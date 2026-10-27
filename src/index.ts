@@ -29,7 +29,9 @@ import { join, resolve, extname, relative } from "path";
 
 const ONEDRIVE_ROOT =
   process.env.ONEDRIVE_ROOT ??
-  "C:\\Users\\MikeArbrouet\\OneDrive - IBM";
+  (process.platform === "win32"
+    ? `C:\\Users\\${process.env.USERNAME ?? "user"}\\OneDrive - IBM`
+    : `/Users/${process.env.USER ?? "user"}/OneDrive - IBM`);
 
 if (!existsSync(ONEDRIVE_ROOT)) {
   console.error(
