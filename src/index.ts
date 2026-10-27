@@ -1,311 +1,273 @@
 #!/usr/bin/env node
 /**
- * onedrive-mcp — MCP server for reading OneDrive files into Bob
+ * onedrive-mcp — MCP server for reading local OneDrive files into Bob
  *
- * Tools exposed:
- *   onedrive_list   — list files/folders at a OneDrive path
- *   onedrive_read   — read text content of a file (docx, xlsx, txt, md, json, etc.)
- *   onedrive_search — search for files by name across OneDrive
+ * OneDrive for Business syncs files to a local folder on this machine.
+ * This server reads those local files directly — no Azure app, no OAuth.
  *
- * Auth: Microsoft OAuth (device code flow) via @azure/msal-node
- * Tokens are cached to ~/.onedrive-mcp-tokens.json between runs.
+ * Root path: C:\Users\MikeArbrouet\OneDrive - IBM\
+ * Override with ONEDRIVE_ROOT environment variable.
+ *
+ * Tools:
+ *   onedrive_list   — list files/folders at a path
+ *   onedrive_read   — read text content of a file
+ *   onedrive_search — search for files by name across the OneDrive root
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
-  PublicClientApplication,
-  DeviceCodeRequest,
-  AuthenticationResult,
-} from "@azure/msal-node";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+  readdirSync,
+  statSync,
+  readFileSync,
+  existsSync,
+} from "fs";
+import { join, resolve, extname, relative } from "path";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const CLIENT_ID = process.env.ONEDRIVE_CLIENT_ID;
-const TOKEN_CACHE_PATH = join(homedir(), ".onedrive-mcp-tokens.json");
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
-const SCOPES = ["Files.Read", "offline_access"];
+const ONEDRIVE_ROOT =
+  process.env.ONEDRIVE_ROOT ??
+  "C:\\Users\\MikeArbrouet\\OneDrive - IBM";
 
-if (!CLIENT_ID) {
+if (!existsSync(ONEDRIVE_ROOT)) {
   console.error(
-    "[onedrive-mcp] ERROR: ONEDRIVE_CLIENT_ID environment variable is required."
+    `[onedrive-mcp] ERROR: OneDrive root not found at "${ONEDRIVE_ROOT}". ` +
+    `Set ONEDRIVE_ROOT environment variable to override.`
   );
   process.exit(1);
 }
 
-// ── Token management ──────────────────────────────────────────────────────────
-
-let cachedToken: AuthenticationResult | null = null;
-
-function loadCachedToken(): AuthenticationResult | null {
-  if (!existsSync(TOKEN_CACHE_PATH)) return null;
-  try {
-    return JSON.parse(readFileSync(TOKEN_CACHE_PATH, "utf8"));
-  } catch {
-    return null;
+// Resolve a user-supplied relative path safely under ONEDRIVE_ROOT
+function safePath(userPath?: string): string {
+  if (!userPath || userPath.trim() === "" || userPath === "/") {
+    return ONEDRIVE_ROOT;
   }
-}
-
-function saveCachedToken(token: AuthenticationResult): void {
-  writeFileSync(TOKEN_CACHE_PATH, JSON.stringify(token, null, 2), "utf8");
-}
-
-function isExpired(token: AuthenticationResult): boolean {
-  if (!token.expiresOn) return true;
-  return new Date(token.expiresOn).getTime() < Date.now() + 60_000;
-}
-
-const msalApp = new PublicClientApplication({
-  auth: {
-    clientId: CLIENT_ID!,
-    authority: "https://login.microsoftonline.com/common",
-  },
-});
-
-async function getAccessToken(): Promise<string> {
-  // Return cached in-memory token if still valid
-  if (cachedToken && !isExpired(cachedToken)) {
-    return cachedToken.accessToken;
+  const full = resolve(ONEDRIVE_ROOT, userPath.replace(/^[\\/]+/, ""));
+  // Prevent path traversal outside the root
+  if (!full.startsWith(ONEDRIVE_ROOT)) {
+    throw new Error(`Path "${userPath}" is outside OneDrive root.`);
   }
-
-  // Try silent refresh using disk cache
-  const diskToken = loadCachedToken();
-  if (diskToken && !isExpired(diskToken)) {
-    cachedToken = diskToken;
-    return diskToken.accessToken;
-  }
-
-  // Try silent acquire via MSAL account cache
-  const accounts = await msalApp.getTokenCache().getAllAccounts();
-  if (accounts.length > 0) {
-    try {
-      const result = await msalApp.acquireTokenSilent({
-        account: accounts[0],
-        scopes: SCOPES,
-      });
-      if (result) {
-        cachedToken = result;
-        saveCachedToken(result);
-        return result.accessToken;
-      }
-    } catch {
-      // Fall through to device code
-    }
-  }
-
-  // Device code flow — prints URL to stderr (visible in Bob's MCP logs)
-  const deviceCodeRequest: DeviceCodeRequest = {
-    scopes: SCOPES,
-    deviceCodeCallback: (response) => {
-      console.error("\n" + "=".repeat(60));
-      console.error("[onedrive-mcp] Authentication required.");
-      console.error(`Visit: ${response.verificationUri}`);
-      console.error(`Code:  ${response.userCode}`);
-      console.error("=".repeat(60) + "\n");
-    },
-  };
-
-  const result = await msalApp.acquireTokenByDeviceCode(deviceCodeRequest);
-  if (!result) throw new Error("Authentication failed — no token returned.");
-  cachedToken = result;
-  saveCachedToken(result);
-  return result.accessToken;
+  return full;
 }
 
-// ── Graph API helpers ─────────────────────────────────────────────────────────
-
-async function graphGet(path: string): Promise<unknown> {
-  const token = await getAccessToken();
-  const res = await fetch(`${GRAPH_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Graph API ${res.status}: ${body.slice(0, 300)}`);
-  }
-  return res.json();
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function graphGetBytes(path: string): Promise<ArrayBuffer> {
-  const token = await getAccessToken();
-  const res = await fetch(`${GRAPH_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Graph API ${res.status}: ${body.slice(0, 300)}`);
-  }
-  return res.arrayBuffer();
-}
+// ── Server ────────────────────────────────────────────────────────────────────
 
-// Encode a OneDrive path for use in Graph API URLs
-function encodePath(p: string): string {
-  // Strip leading slash, encode each segment
-  const clean = p.replace(/^\//, "");
-  if (!clean) return "/me/drive/root";
-  return `/me/drive/root:/${encodeURIComponent(clean).replace(/%2F/g, "/")}`;
-}
+const server = new McpServer({ name: "onedrive-mcp", version: "2.0.0" });
 
-// ── Tools ─────────────────────────────────────────────────────────────────────
+// ── onedrive_list ─────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "onedrive-mcp", version: "1.0.0" });
-
-// onedrive_list — list contents of a folder
 server.tool(
   "onedrive_list",
-  "List files and folders at a given OneDrive path. Leave path empty to list the root.",
+  "List files and folders inside your local OneDrive (OneDrive - IBM). Leave path empty to list the root.",
   {
     path: z
       .string()
       .optional()
       .describe(
-        'OneDrive folder path, e.g. "Documents" or "Disney Account". Leave empty for root.'
+        'Subfolder to list, relative to OneDrive root. E.g. "Disney" or "Disney/Disney SAB". Leave empty for root.'
       ),
   },
-  async ({ path: folderPath }) => {
+  async ({ path: userPath }) => {
     try {
-      const base = folderPath
-        ? `${encodePath(folderPath)}:/children`
-        : "/me/drive/root/children";
-      const data = (await graphGet(
-        `${base}?$select=name,size,lastModifiedDateTime,file,folder&$top=100`
-      )) as { value: Array<Record<string, unknown>> };
-
-      const items = (data.value || []).map((item) => {
-        const isFolder = !!item.folder;
-        const size = item.size as number | undefined;
-        const modified = item.lastModifiedDateTime as string | undefined;
-        return `${isFolder ? "📁" : "📄"} ${item.name}${
-          !isFolder && size ? `  (${Math.round(size / 1024)} KB)` : ""
-        }${modified ? `  — ${new Date(modified).toLocaleDateString()}` : ""}`;
-      });
-
-      const header = `OneDrive: /${folderPath || ""}\n${"─".repeat(50)}\n`;
-      return {
-        content: [
-          { type: "text" as const, text: header + items.join("\n") },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Error listing path: ${(err as Error).message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-// onedrive_read — read a file's text content
-server.tool(
-  "onedrive_read",
-  "Read the text content of a OneDrive file. Supports .txt, .md, .json, .csv, .html, .js, .ts, .py, .docx (plain text extraction), and .xlsx (plain text extraction).",
-  {
-    path: z
-      .string()
-      .describe('Full OneDrive path to the file, e.g. "Documents/notes.md"'),
-  },
-  async ({ path: filePath }) => {
-    try {
-      const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
-      const itemPath = encodePath(filePath);
-
-      // For Office files, use the Graph /content endpoint with format conversion
-      if (ext === "docx" || ext === "doc") {
-        const bytes = await graphGetBytes(
-          `${itemPath}:/content?format=txt`
-        );
-        const text = new TextDecoder().decode(bytes);
-        return { content: [{ type: "text" as const, text }] };
-      }
-
-      if (ext === "xlsx" || ext === "xls") {
-        // Download raw bytes and return a note — full Excel parsing requires
-        // additional libraries. Return CSV-like text via Graph format conversion.
-        const bytes = await graphGetBytes(
-          `${itemPath}:/content?format=csv`
-        );
-        const text = new TextDecoder().decode(bytes);
-        return { content: [{ type: "text" as const, text }] };
-      }
-
-      // Plain text files — download directly
-      const bytes = await graphGetBytes(`${itemPath}:/content`);
-      const text = new TextDecoder().decode(bytes);
-      return { content: [{ type: "text" as const, text }] };
-    } catch (err) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Error reading file: ${(err as Error).message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-// onedrive_search — search for files by name
-server.tool(
-  "onedrive_search",
-  "Search for files across OneDrive by name or content keyword.",
-  {
-    query: z.string().describe("Search term, e.g. a filename or keyword"),
-    max_results: z
-      .number()
-      .optional()
-      .describe("Maximum number of results to return (default 20)"),
-  },
-  async ({ query, max_results = 20 }) => {
-    try {
-      const data = (await graphGet(
-        `/me/drive/root/search(q='${encodeURIComponent(query)}')?$select=name,size,lastModifiedDateTime,parentReference&$top=${max_results}`
-      )) as { value: Array<Record<string, unknown>> };
-
-      if (!data.value?.length) {
+      const dir = safePath(userPath);
+      if (!existsSync(dir)) {
         return {
-          content: [
-            { type: "text" as const, text: `No files found matching "${query}"` },
-          ],
+          content: [{ type: "text" as const, text: `Path not found: ${userPath}` }],
+          isError: true,
+        };
+      }
+      const stat = statSync(dir);
+      if (!stat.isDirectory()) {
+        return {
+          content: [{ type: "text" as const, text: `"${userPath}" is a file, not a folder. Use onedrive_read to read it.` }],
+          isError: true,
         };
       }
 
-      const results = (data.value || []).map((item) => {
-        const parent = (item.parentReference as Record<string, string> | undefined)?.path ?? "";
-        const cleanPath = parent.replace("/drive/root:", "") + "/" + item.name;
-        const modified = item.lastModifiedDateTime as string | undefined;
-        const size = item.size as number | undefined;
-        return `📄 ${cleanPath}${size ? `  (${Math.round(size / 1024)} KB)` : ""}${
-          modified ? `  — ${new Date(modified).toLocaleDateString()}` : ""
-        }`;
-      });
+      const entries = readdirSync(dir, { withFileTypes: true });
+      const lines = entries
+        .sort((a, b) => {
+          // Folders first, then files, both alphabetical
+          if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        })
+        .map((entry) => {
+          if (entry.isDirectory()) {
+            return `📁 ${entry.name}/`;
+          }
+          const full = join(dir, entry.name);
+          const s = statSync(full);
+          const modified = s.mtime.toLocaleDateString();
+          return `📄 ${entry.name}  (${formatSize(s.size)})  — ${modified}`;
+        });
 
+      const relPath = relative(ONEDRIVE_ROOT, dir) || "(root)";
+      const header = `OneDrive: ${relPath}\n${"─".repeat(50)}\n`;
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Search results for "${query}":\n${"─".repeat(50)}\n${results.join("\n")}`,
-          },
-        ],
+        content: [{ type: "text" as const, text: header + (lines.length ? lines.join("\n") : "(empty folder)") }],
       };
     } catch (err) {
       return {
-        content: [
-          {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── onedrive_read ─────────────────────────────────────────────────────────────
+
+const TEXT_EXTS = new Set([
+  ".txt", ".md", ".markdown", ".json", ".jsonc", ".csv",
+  ".html", ".htm", ".xml", ".yaml", ".yml",
+  ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+  ".py", ".sh", ".bat", ".ps1", ".sql",
+  ".log", ".env", ".ini", ".toml", ".cfg",
+]);
+
+server.tool(
+  "onedrive_read",
+  "Read the text content of a file in your local OneDrive. Supports plain-text files (.txt, .md, .json, .csv, .py, .js, .html, etc.). For .docx/.xlsx use the office_read tool instead after noting the full path.",
+  {
+    path: z
+      .string()
+      .describe(
+        'Path to the file relative to OneDrive root. E.g. "Disney/meeting-notes.md" or "Documents/report.txt"'
+      ),
+  },
+  async ({ path: userPath }) => {
+    try {
+      const full = safePath(userPath);
+      if (!existsSync(full)) {
+        return {
+          content: [{ type: "text" as const, text: `File not found: ${userPath}\nFull path checked: ${full}` }],
+          isError: true,
+        };
+      }
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        return {
+          content: [{ type: "text" as const, text: `"${userPath}" is a folder. Use onedrive_list to browse it.` }],
+          isError: true,
+        };
+      }
+
+      const ext = extname(full).toLowerCase();
+      if (!TEXT_EXTS.has(ext)) {
+        return {
+          content: [{
             type: "text" as const,
-            text: `Error searching: ${(err as Error).message}`,
-          },
-        ],
+            text:
+              `"${userPath}" is a binary file (${ext}).\n` +
+              `Full path: ${full}\n\n` +
+              `To read it, use the office_read tool with:\n  path: ${full}`,
+          }],
+        };
+      }
+
+      // Size guard — cap at 500 KB to avoid flooding context
+      if (stat.size > 500 * 1024) {
+        return {
+          content: [{
+            type: "text" as const,
+            text:
+              `File is too large to read directly (${formatSize(stat.size)}).\n` +
+              `Full path: ${full}\n` +
+              `Use office_read or a more specific path.`,
+          }],
+          isError: true,
+        };
+      }
+
+      const text = readFileSync(full, "utf8");
+      return { content: [{ type: "text" as const, text }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error reading file: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── onedrive_search ───────────────────────────────────────────────────────────
+
+function* walkDir(dir: string, maxDepth: number, depth = 0): Generator<string> {
+  if (depth > maxDepth) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkDir(full, maxDepth, depth + 1);
+    } else {
+      yield full;
+    }
+  }
+}
+
+server.tool(
+  "onedrive_search",
+  "Search for files by name across your local OneDrive. Returns matching file paths.",
+  {
+    query: z.string().describe("Filename keyword to search for (case-insensitive)"),
+    folder: z
+      .string()
+      .optional()
+      .describe('Limit search to a subfolder, e.g. "Disney". Leave empty to search all of OneDrive.'),
+    max_results: z
+      .number()
+      .optional()
+      .describe("Maximum results to return (default 25)"),
+  },
+  async ({ query, folder, max_results = 25 }) => {
+    try {
+      const searchRoot = safePath(folder);
+      if (!existsSync(searchRoot)) {
+        return {
+          content: [{ type: "text" as const, text: `Folder not found: ${folder}` }],
+          isError: true,
+        };
+      }
+
+      const lower = query.toLowerCase();
+      const matches: string[] = [];
+
+      for (const fullPath of walkDir(searchRoot, 6)) {
+        const name = fullPath.split(/[\\/]/).pop() ?? "";
+        if (name.toLowerCase().includes(lower)) {
+          matches.push(fullPath);
+          if (matches.length >= max_results) break;
+        }
+      }
+
+      if (!matches.length) {
+        return {
+          content: [{ type: "text" as const, text: `No files found matching "${query}"${folder ? ` in ${folder}` : ""}.` }],
+        };
+      }
+
+      const lines = matches.map((p) => {
+        const rel = relative(ONEDRIVE_ROOT, p);
+        const s = statSync(p);
+        return `📄 ${rel}  (${formatSize(s.size)})  — ${s.mtime.toLocaleDateString()}`;
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Found ${matches.length} file(s) matching "${query}":\n${"─".repeat(50)}\n${lines.join("\n")}`,
+        }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error searching: ${(err as Error).message}` }],
         isError: true,
       };
     }
@@ -317,7 +279,7 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[onedrive-mcp] Server running on stdio");
+  console.error(`[onedrive-mcp] Server running. Root: ${ONEDRIVE_ROOT}`);
 }
 
 main().catch((err) => {
